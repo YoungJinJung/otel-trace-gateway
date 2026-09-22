@@ -1,5 +1,7 @@
 # OTel Trace Gateway
 
+English | [한국어](README.ko.md)
+
 A central [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) deployment that
 speaks the Datadog tracer protocol, so instrumented apps just point
 `DD_TRACE_AGENT_URL` at it — no re-instrumentation. It pins every span to one
