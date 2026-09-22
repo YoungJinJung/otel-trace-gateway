@@ -42,21 +42,31 @@ Datadog Agent의 태거는 **자기 노드의 kubelet에서만 pod를 읽습니�
 
 ## 3. 아키텍처
 
-```
-app pods (기존 트레이서 그대로)
-      |  DD_TRACE_AGENT_URL -> <gateway-service>:8126
-      v
-+---------------- OTel Collector (Deployment, 중앙) ----------------+
-|  datadogreceiver          Datadog 트레이서 프로토콜 수신           |
-|  filter/ignore_resources  health/liveness 루트 span 제거          |
-|  transform/promote        k8s.container.name -> 리소스 속성       |
-|  k8sattributes            K8s API 조회: pod/컨테이너/노드레이블    |
-|  transform/identity       datadog.host.name 고정 -> APM 호스트 1  |
-|                           kube_ownerref_* 합성                    |
-|  transform/opname         operation.name 복원                     |
-|  datadog/connector        APM trace metrics 생성                  |
-|  datadog exporter         -> Datadog                              |
-+---------------------------------------------------------------------+
+```mermaid
+flowchart LR
+    App["App pods<br/>(기존 트레이서 그대로)"]
+    Svc("Service<br/>your-gateway-service:8126")
+    K8sAPI[("Kubernetes<br/>API 서버")]
+    DD[("Datadog")]
+
+    App -->|"DD_TRACE_AGENT_URL"| Svc --> R
+
+    subgraph Gateway["OTel Collector (Deployment, 중앙, 고정 노드)"]
+        direction TB
+        R["datadogreceiver<br/>Datadog 트레이서 프로토콜 수신"]
+        F["filter/ignore_resources<br/>health/liveness 루트 span 제거"]
+        P["transform/promote<br/>k8s.container.name → 리소스 속성"]
+        K["k8sattributes<br/>pod / 컨테이너 / 노드 조회"]
+        I["transform/identity<br/>datadog.host.name 고정 → APM 호스트 1개<br/>kube_ownerref_* 합성"]
+        O["transform/opname<br/>operation.name 복원"]
+        C["datadog/connector<br/>APM trace metrics 생성"]
+        E["datadog exporter"]
+
+        R --> F --> P --> K --> I --> O --> C --> E
+    end
+
+    K -.->|"pod / 컨테이너 / 노드 메타데이터 조회"| K8sAPI
+    E --> DD
 ```
 
 ## 4. 보존되는 것과 잃는 것

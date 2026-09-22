@@ -67,21 +67,31 @@ changes.
 
 ## 3. Architecture
 
-```
-app pods (existing tracer, unchanged)
-      |  DD_TRACE_AGENT_URL -> <gateway-service>:8126
-      v
-+---------------- OTel Collector (Deployment, central) -------------+
-|  datadogreceiver          receives the Datadog tracer protocol    |
-|  filter/ignore_resources  drops health/liveness root spans        |
-|  transform/promote        k8s.container.name -> resource attr     |
-|  k8sattributes            K8s API lookup: pod/container/node      |
-|  transform/identity       pins datadog.host.name -> 1 APM host    |
-|                           synthesizes kube_ownerref_*             |
-|  transform/opname         restores operation.name                 |
-|  datadog/connector        generates APM trace metrics             |
-|  datadog exporter         -> Datadog                              |
-+---------------------------------------------------------------------+
+```mermaid
+flowchart LR
+    App["App pods<br/>(existing tracer, unchanged)"]
+    Svc("Service<br/>your-gateway-service:8126")
+    K8sAPI[("Kubernetes<br/>API server")]
+    DD[("Datadog")]
+
+    App -->|"DD_TRACE_AGENT_URL"| Svc --> R
+
+    subgraph Gateway["OTel Collector (Deployment, central, pinned node)"]
+        direction TB
+        R["datadogreceiver<br/>receives the Datadog tracer protocol"]
+        F["filter/ignore_resources<br/>drops health/liveness root spans"]
+        P["transform/promote<br/>k8s.container.name → resource attr"]
+        K["k8sattributes<br/>pod / container / node lookup"]
+        I["transform/identity<br/>pins datadog.host.name → 1 APM host<br/>synthesizes kube_ownerref_*"]
+        O["transform/opname<br/>restores operation.name"]
+        C["datadog/connector<br/>generates APM trace metrics"]
+        E["datadog exporter"]
+
+        R --> F --> P --> K --> I --> O --> C --> E
+    end
+
+    K -.->|"resolves pod / container / node metadata"| K8sAPI
+    E --> DD
 ```
 
 ## 4. What survives and what doesn't
