@@ -1,0 +1,177 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "otel-trace-gateway.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      # Speaks the Datadog tracer protocol, so instrumented apps change only
+      # DD_TRACE_AGENT_URL -- no re-instrumentation.
+      datadog:
+        endpoint: 0.0.0.0:{{ .Values.service.port }}
+      {{- if .Values.collector.selfMetrics.enabled }}
+
+      # The gateway is a single point every routed workload depends on, so its
+      # own saturation has to be visible before it starts dropping spans.
+      #
+      # pod_name is set explicitly: the datadog exporter does not tag from
+      # target_info (resource_attributes_as_tags is off), and every replica
+      # otherwise scrapes as the same localhost:8888 series, collapsing
+      # per-replica saturation into one Datadog context.
+      prometheus/internal:
+        config:
+          scrape_configs:
+            - job_name: otel-trace-gateway
+              scrape_interval: {{ .Values.collector.selfMetrics.scrapeInterval }}
+              static_configs:
+                - targets: ["localhost:{{ .Values.collector.selfMetrics.port }}"]
+                  labels:
+                    pod_name: "${env:POD_NAME}"
+      {{- end }}
+
+    processors:
+      # First in every pipeline, by design. Without it a traffic spike grows the
+      # heap until the cgroup limit kills the process; with it the collector
+      # refuses data and forces GC instead, degrading to dropped spans rather
+      # than a restart. That matters more than usual here: replicas are few and
+      # pinned one-per-node, so one OOM shifts its load onto the rest.
+      memory_limiter:
+        check_interval: {{ .Values.collector.memoryLimiter.checkInterval }}
+        limit_percentage: {{ .Values.collector.memoryLimiter.limitPercentage }}
+        spike_limit_percentage: {{ .Values.collector.memoryLimiter.spikeLimitPercentage }}
+
+      {{- with .Values.collector.ignoreResources }}
+      # Same patterns as the node agent's DD_APM_IGNORE_RESOURCES, matched on
+      # dd.span.Resource (where datadogreceiver puts the Datadog resource name).
+      #
+      # IsRootSpan() is load-bearing, not a refinement. The node agent tests the
+      # pattern against the *root* span only and drops that whole trace; a
+      # filter processor sees every span, so without this guard `^GET$` would
+      # also delete ordinary child spans — redis GET, cache GET, outbound GET —
+      # and, because datadog/connector sits after this, their trace metrics too.
+      #
+      # This is close to the node agent but not identical: the node agent drops
+      # the entire trace, while this drops the matching root and leaves its
+      # children behind. Matching trace-for-trace would need tail_sampling plus
+      # load-balancing across replicas, which is a larger change than the noise
+      # it removes. Runs first: a span about to be dropped is not worth
+      # enriching.
+      filter/ignore_resources:
+        error_mode: ignore
+        traces:
+          span:
+            {{- range . }}
+            - IsRootSpan() and IsMatch(span.attributes["dd.span.Resource"], {{ . | quote }})
+            {{- end }}
+      {{- end }}
+
+      # k8sattributes requires k8s.container.name as a *resource* attribute
+      # before it will attach container tags; DD_TAGS arrives as a span
+      # attribute, so promote it first.
+      transform/promote:
+        trace_statements:
+          - set(resource.attributes["k8s.container.name"], span.attributes["k8s.container.name"]) where span.attributes["k8s.container.name"] != nil
+
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        pod_association:
+          # Datadog-protocol payloads carry no k8s.pod.ip, so associate by
+          # connection source IP.
+          - sources:
+              - from: connection
+        extract:
+          metadata:
+            {{- toYaml .Values.collector.extractMetadata | nindent 12 }}
+          {{- with .Values.collector.nodeLabels }}
+          labels:
+            {{- range . }}
+            - tag_name: {{ .tagName }}
+              key: {{ .key }}
+              from: node
+            {{- end }}
+          {{- end }}
+
+      transform/identity:
+        trace_statements:
+          # Pins every span to one hostname. This is what collapses the APM
+          # host count; it is also why host-entity tags cannot survive.
+          - set(resource.attributes["datadog.host.name"], {{ .Values.datadog.hostname | quote }})
+          # k8sattributes has no ownerref field; synthesise from the workload kind.
+          - set(resource.attributes["kube_ownerref_kind"], "replicaset") where resource.attributes["k8s.replicaset.name"] != nil
+          - set(resource.attributes["kube_ownerref_name"], resource.attributes["k8s.replicaset.name"]) where resource.attributes["k8s.replicaset.name"] != nil
+          - set(resource.attributes["kube_ownerref_kind"], "job") where resource.attributes["k8s.job.name"] != nil
+          - set(resource.attributes["kube_ownerref_name"], resource.attributes["k8s.job.name"]) where resource.attributes["k8s.job.name"] != nil
+          - set(resource.attributes["kube_ownerref_kind"], "statefulset") where resource.attributes["k8s.statefulset.name"] != nil
+          - set(resource.attributes["kube_ownerref_name"], resource.attributes["k8s.statefulset.name"]) where resource.attributes["k8s.statefulset.name"] != nil
+          - set(resource.attributes["kube_ownerref_kind"], "daemonset") where resource.attributes["k8s.daemonset.name"] != nil
+          - set(resource.attributes["kube_ownerref_name"], resource.attributes["k8s.daemonset.name"]) where resource.attributes["k8s.daemonset.name"] != nil
+
+      # Without this the exporter recomputes the operation name from span kind
+      # (canary.tick -> Internal), and trace.<op>.hits metric names follow --
+      # breaking every monitor keyed on them. This attribute wins over both.
+      transform/opname:
+        trace_statements:
+          - set(span.attributes["operation.name"], span.name) where span.attributes["operation.name"] == nil
+
+      batch:
+        timeout: {{ .Values.collector.batchTimeout }}
+
+    connectors:
+      # APM trace metrics are not generated without this.
+      datadog/connector:
+        traces:
+          compute_stats_by_span_kind: true
+          peer_tags_aggregation: true
+
+    exporters:
+      datadog:
+        hostname: {{ .Values.datadog.hostname | quote }}
+        api:
+          key: ${env:DD_API_KEY}
+          site: {{ .Values.datadog.site | quote }}
+        host_metadata:
+          # Required for hostTags below to land as native host tags.
+          enabled: true
+          hostname_source: config_or_system
+          {{- with .Values.datadog.hostTags }}
+          tags:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:{{ .Values.healthPort }}
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: {{ .Values.collector.logLevel }}
+        # No metrics.readers override: the collector's default reader already
+        # pulls from localhost:{{ .Values.collector.selfMetrics.port }} with
+        # without_type_suffix/without_units/without_scope_info all on, which is
+        # what the metric names below assume. Setting readers explicitly flips
+        # those off and renames every series (e.g. otelcol_process_memory_rss
+        # -> _bytes).
+      pipelines:
+        traces:
+          receivers: [datadog]
+          processors: [memory_limiter, {{ if .Values.collector.ignoreResources }}filter/ignore_resources, {{ end }}transform/promote, k8sattributes, transform/identity, transform/opname, batch]
+          exporters: [datadog/connector, datadog]
+        metrics:
+          receivers: [datadog/connector]
+          processors: [memory_limiter, batch]
+          exporters: [datadog]
+        {{- if .Values.collector.selfMetrics.enabled }}
+        # Deliberately its own pipeline, without memory_limiter: gating this
+        # behind the shared limiter would drop the one signal meant to show
+        # saturation right as it happens. Volume is tiny (one scrape of
+        # ~30 series every {{ .Values.collector.selfMetrics.scrapeInterval }}), so skipping the limiter here is safe.
+        metrics/internal:
+          receivers: [prometheus/internal]
+          processors: [batch]
+          exporters: [datadog]
+        {{- end }}

@@ -1,0 +1,16 @@
+# The single address workloads point DD_TRACE_AGENT_URL at:
+# http://<release>.<namespace>.svc.cluster.local:<port>.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "otel-trace-gateway.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "otel-trace-gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: traceport
+      port: {{ .Values.service.port }}
+      targetPort: traceport
+      protocol: TCP
