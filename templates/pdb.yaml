@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Trace loss is not a service outage -- tracers drop spans when the gateway is
+# unreachable and the traced workload is unaffected -- but keep one serving.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "otel-trace-gateway.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "otel-trace-gateway.selectorLabels" . | nindent 6 }}
+{{- end }}

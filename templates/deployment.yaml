@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "otel-trace-gateway.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "otel-trace-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "otel-trace-gateway.labels" . | nindent 8 }}
+      annotations:
+        # Rolls the pods when the collector config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      affinity:
+        {{- if .Values.scheduling.nodeAffinity }}
+        nodeAffinity:
+          {{- toYaml .Values.scheduling.nodeAffinity | nindent 10 }}
+        {{- else if .Values.scheduling.managedNodeGroupOnly }}
+        # Karpenter consolidates and expires nodes; a gateway there would
+        # migrate and turn each new node into an APM host in turn.
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: eks.amazonaws.com/nodegroup
+                    operator: Exists
+        {{- end }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "otel-trace-gateway.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      {{- with .Values.scheduling.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: collector
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config=/conf/config.yaml"]
+          env:
+            {{- if .Values.collector.selfMetrics.enabled }}
+            # Tags the self-metrics scrape below so replicas don't collapse
+            # into one Datadog context.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
+            {{- if .Values.collector.goMemLimit }}
+            # Go does not read the cgroup limit on its own, so without this the
+            # runtime grows the heap past what the container is allowed.
+            - name: GOMEMLIMIT
+              value: {{ .Values.collector.goMemLimit | quote }}
+            {{- end }}
+            - name: DD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.datadog.apiKeySecret.name }}
+                  key: {{ .Values.datadog.apiKeySecret.key }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: traceport
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          volumeMounts:
+            - name: conf
+              mountPath: /conf
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: conf
+          configMap:
+            name: {{ .Release.Name }}

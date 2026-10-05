@@ -1,0 +1,138 @@
+# Central trace gateway for the cluster.
+#
+# Workloads point DD_TRACE_AGENT_URL here instead of their node agent. APM
+# bills per hostname that submits traces, so pinning every span to one
+# hostname decouples the APM host count from pod and node fan-out.
+#
+# The trade: host-entity tags are joined by hostname at query time, so pinning
+# the hostname gives them up permanently -- including the APM-to-EC2 pivot.
+# Everything else (pod, container, node labels, org tags) is recovered here.
+#
+# Cluster-agnostic defaults only. Per-cluster values belong in
+# clusters/<cluster>/addons/otel-trace-gateway/values.yaml.
+
+image:
+  repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Used when autoscaling.enabled is false.
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  # podAntiAffinity is required on hostname, so replicas cannot exceed the
+  # number of eligible nodes.
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+datadog:
+  site: datadoghq.com
+
+  # One stable name for every replica -- the whole point of the gateway.
+  hostname: otel-trace-gateway
+
+  # Cluster-wide facts, injected because the node's EC2 tags are gone.
+  hostTags: []
+
+  apiKeySecret:
+    create: true
+    name: otel-trace-gateway
+    key: api-key
+    secretStore:
+      name: aws-secretsmanager
+      kind: ClusterSecretStore
+    remoteRef:
+      # Path in your secret store, e.g. "prod/datadog". Adjust to your
+      # own naming convention.
+      key: <your-secret-path>/datadog
+      property: api-key
+    refreshInterval: 1h
+
+collector:
+  logLevel: info
+  batchTimeout: 5s
+
+  # Percentages of the container memory limit, so raising that limit raises
+  # these with it. spike_limit is the headroom reserved for a burst arriving
+  # between two checks.
+  memoryLimiter:
+    checkInterval: 1s
+    limitPercentage: 80
+    spikeLimitPercentage: 25
+
+  # Soft ceiling for the Go runtime. Keep below resources.limits.memory so GC
+  # works harder before the kernel intervenes.
+  goMemLimit: "1600MiB"
+
+  # The collector's own telemetry, scraped from itself and shipped as metrics.
+  selfMetrics:
+    enabled: true
+    # 8888 is the collector's built-in telemetry port, not something this
+    # chart configures -- changing this only moves the scrape target, not
+    # where the collector actually binds, and breaks the scrape.
+    port: 8888
+    scrapeInterval: 30s
+
+  # Keep in step with DD_APM_IGNORE_RESOURCES on the node agent DaemonSet.
+  ignoreResources:
+    - "(GET|HEAD) /health"
+    - "(GET|HEAD) /actuator/health.*"
+    - "(GET|HEAD) /liveness"
+    - "Rails::HealthController#show"
+    - "^GET$"
+
+  extractMetadata:
+    - k8s.pod.name
+    - k8s.pod.uid
+    - k8s.deployment.name
+    - k8s.replicaset.name
+    - k8s.daemonset.name
+    - k8s.statefulset.name
+    - k8s.job.name
+    - k8s.cronjob.name
+    - k8s.node.name
+    - k8s.namespace.name
+    - k8s.pod.start_time
+    - k8s.container.name
+    - container.id
+    - container.image.name
+    - container.image.tag
+
+  # Node EC2 facts survive as node labels even though host tags do not.
+  nodeLabels:
+    - tagName: host.type
+      key: node.kubernetes.io/instance-type
+    - tagName: cloud.availability_zone
+      key: topology.kubernetes.io/zone
+    - tagName: cloud.region
+      key: topology.kubernetes.io/region
+    - tagName: karpenter_nodepool
+      key: karpenter.sh/nodepool
+    - tagName: eks_nodegroup
+      key: eks.amazonaws.com/nodegroup
+
+extraEnv: []
+
+service:
+  port: 8126
+
+healthPort: 13133
+
+scheduling:
+  managedNodeGroupOnly: true
+  nodeAffinity: {}
+  tolerations: []
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# memoryLimiter works off the limit below, so the two move together.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi

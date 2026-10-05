@@ -1,0 +1,6 @@
+apiVersion: v2
+name: otel-trace-gateway
+description: Central OpenTelemetry Collector that accepts Datadog tracer traffic and submits it under one APM hostname, resolving pod metadata from the Kubernetes API
+type: application
+version: 0.1.0
+appVersion: 0.158.0
