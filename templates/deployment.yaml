@@ -5,6 +5,12 @@ metadata:
   labels:
     {{- include "otel-trace-gateway.labels" . | nindent 4 }}
 spec:
+  # Free a node before replacing a pod when required anti-affinity fills every node.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}

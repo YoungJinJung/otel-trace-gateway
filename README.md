@@ -278,6 +278,9 @@ nodes.
   point.
 - A required `podAntiAffinity` on hostname means **replica count can't
   exceed the number of eligible nodes** — size HPA `maxReplicas` accordingly.
+- Rolling updates use `maxSurge: 0` and `maxUnavailable: 1`, freeing one
+  node before starting its replacement. Keep at least two replicas for
+  availability during updates.
 - `pod_association` uses `from: connection` (TCP source IP) — Datadog
   protocol payloads carry no `k8s.pod.ip` resource attribute.
 
@@ -285,6 +288,12 @@ nodes.
 
 Enable the Collector's `health_check` extension and wire it to the readiness
 / liveness probes — more accurate than a plain TCP check on the trace port.
+
+The Collector waits for the Kubernetes metadata cache to sync before accepting
+traces. Startup fails if syncing takes longer than
+`collector.metadataSyncTimeout` (default `30s`), rather than accepting traces
+without Pod and container tags. If you increase this timeout, allow enough
+time in the liveness probe settings for startup to finish.
 
 ## 7. Rolling workloads onto the gateway — a route, not a flag
 
@@ -390,6 +399,23 @@ the next pod restart.
   attach a `debug` exporter, send a payload, and see exactly what passes and
   what gets dropped.
 - **This is meaningless if Datadog isn't your trace backend.**
+
+### Local and CI validation
+
+With Helm, Docker, and Python 3 installed, run:
+
+```shell
+python3 -m venv .venv
+.venv/bin/python -m pip install -r tests/requirements.txt
+.venv/bin/python tests/check_chart.py
+```
+
+The same check runs on pushes and pull requests. It lints and renders the
+default chart, a fixed three-replica deployment, and a configuration without
+resource filters or self-metrics. It checks rollout availability with no spare
+nodes and runs `validate` using the Collector image from each rendered
+Deployment. Validation uses a dummy API key with container networking disabled;
+it does not require Kubernetes or Datadog credentials.
 
 ## 10. Check the cost math before you build this
 

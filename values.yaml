@@ -53,6 +53,8 @@ datadog:
 collector:
   logLevel: info
   batchTimeout: 5s
+  # Fail startup if Kubernetes metadata cannot be synced within this window.
+  metadataSyncTimeout: 30s
 
   # Percentages of the container memory limit, so raising that limit raises
   # these with it. spike_limit is the headroom reserved for a burst arriving

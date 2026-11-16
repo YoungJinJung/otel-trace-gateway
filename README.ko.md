@@ -217,11 +217,14 @@ rules:
 - **자체 배포 단위로 분리하세요.** 모니터링 스택 안에 두면 게이트웨이 장애가 모니터링 전체를 끌고 갑니다.
 - **오토스케일 노드가 아니라 고정 노드에 배치하세요.** 소멸·재생성되는 노드에 두면 게이트웨이 호스트 이름이 계속 바뀌어 목적이 훼손됩니다.
 - `podAntiAffinity`를 hostname에 required로 두면 **replica 수가 가용 노드 수를 넘을 수 없습니다.** HPA `maxReplicas`를 그에 맞추세요.
+- 롤링 업데이트는 `maxSurge: 0`, `maxUnavailable: 1`로 기존 Pod 하나를 먼저 종료해 교체할 자리를 확보합니다. 업데이트 중에도 서비스하려면 replica를 최소 2개 유지하세요.
 - `pod_association`은 `from: connection`(TCP 소스 IP)을 씁니다 — Datadog 프로토콜 페이로드에는 `k8s.pod.ip` 리소스 속성이 없습니다.
 
 ### 헬스체크
 
 Collector의 `health_check` extension을 켜고 probe에 쓰면, 트레이스 포트 TCP 체크보다 정확합니다.
+
+Collector는 Kubernetes 메타데이터 캐시 동기화를 마친 뒤 트레이스를 수신합니다. `collector.metadataSyncTimeout`(기본 `30s`) 안에 동기화하지 못하면 Pod·컨테이너 태그가 없는 트레이스를 받는 대신 기동에 실패합니다. 이 제한 시간을 늘릴 때는 liveness probe도 기동을 충분히 기다리도록 조정하세요.
 
 ## 7. 워크로드 전환 — 플래그가 아니라 경로
 
@@ -307,6 +310,18 @@ components:
 
 - 필터 동작도 실제로 확인할 수 있습니다 — 로컬에서 Collector를 띄우고 `debug` exporter로 붙인 뒤 payload를 보내면 무엇이 통과하고 무엇이 버려지는지 그대로 보입니다.
 - **Datadog이 트레이스 백엔드가 아닌 환경에는 의미가 없습니다.**
+
+### 로컬 및 CI 검증
+
+Helm, Docker, Python 3가 설치된 환경에서 실행합니다.
+
+```shell
+python3 -m venv .venv
+.venv/bin/python -m pip install -r tests/requirements.txt
+.venv/bin/python tests/check_chart.py
+```
+
+push와 pull request에서도 같은 검사를 실행합니다. 기본값, 고정 replica 3개, 리소스 필터·자체 메트릭을 끈 구성에 대해 lint와 렌더링을 검사합니다. 여유 노드가 없는 조건에서 롤링 업데이트가 진행되고 replica가 남는지도 확인하며, 렌더링한 Deployment의 Collector 이미지로 설정을 `validate`합니다. 더미 API 키를 사용하고 컨테이너 네트워크를 차단하므로 Kubernetes나 Datadog 인증 정보가 필요하지 않습니다.
 
 ## 10. 비용 관점 점검
 
