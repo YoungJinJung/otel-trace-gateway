@@ -77,6 +77,9 @@ data:
       k8sattributes:
         auth_type: serviceAccount
         passthrough: false
+        # Do not accept traces before the Kubernetes metadata cache is ready.
+        wait_for_metadata: true
+        wait_for_metadata_timeout: {{ .Values.collector.metadataSyncTimeout }}
         pod_association:
           # Datadog-protocol payloads carry no k8s.pod.ip, so associate by
           # connection source IP.

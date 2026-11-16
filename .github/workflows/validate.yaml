@@ -1,0 +1,25 @@
+name: Validate chart
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+        with:
+          version: v3.19.0
+      - name: Validate rendered chart and Collector configuration
+        run: |
+          python3 -m venv "$RUNNER_TEMP/chart-check"
+          "$RUNNER_TEMP/chart-check/bin/python" -m pip install -r tests/requirements.txt
+          "$RUNNER_TEMP/chart-check/bin/python" tests/check_chart.py
